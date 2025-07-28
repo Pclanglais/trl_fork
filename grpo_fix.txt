@@ -1,0 +1,107 @@
+def shuffle_sequence_dict(seq_dict: dict[str, Optional[Sequence]]) -> dict[str, Optional[Sequence]]:
+    """
+    Shuffles all sequence-like values in a dictionary along the first dimension in unison.
+    
+    Fixed version that properly handles mixed data types including strings,
+    which is necessary for GSPO (importance_sampling_level="sequence").
+
+    Example:
+    ```python
+    >>> x = torch.arange(6).reshape(3, 2)
+    >>> y = ["a", "b", "c"]
+    >>> seq_dict = {"x": x, "y": y}
+    >>> shuffle_sequence_dict(seq_dict)
+    {'x': tensor([[2, 3],
+                  [0, 1],
+                  [4, 5]]),
+     'y': ['b', 'a', 'c']}
+    ```
+    """
+    # Find the first non-None value to determine batch size
+    first_non_none = None
+    batch_size = None
+    
+    for v in seq_dict.values():
+        if v is not None:
+            first_non_none = v
+            break
+    
+    if first_non_none is None:
+        return seq_dict
+    
+    # Determine batch size more carefully to handle mixed data types
+    if isinstance(first_non_none, torch.Tensor):
+        batch_size = first_non_none.shape[0]
+    elif isinstance(first_non_none, (list, tuple)) and not isinstance(first_non_none, str):
+        batch_size = len(first_non_none)
+    elif isinstance(first_non_none, str):
+        # If the first value is a string, look for a proper sequence to determine batch size
+        for v in seq_dict.values():
+            if v is not None and not isinstance(v, str):
+                if isinstance(v, torch.Tensor):
+                    batch_size = v.shape[0]
+                    break
+                elif isinstance(v, (list, tuple)):
+                    batch_size = len(v)
+                    break
+        
+        # If we still don't have a batch size, treat strings as single items (no shuffling needed)
+        if batch_size is None:
+            return seq_dict
+    else:
+        try:
+            batch_size = len(first_non_none)
+        except TypeError:
+            # If len() fails, treat as single item (no shuffling needed)
+            return seq_dict
+    
+    # If batch size is 1 or less, no shuffling is meaningful
+    if batch_size <= 1:
+        return seq_dict
+        
+    permutation = torch.randperm(batch_size)
+
+    def permute(v: Optional[Sequence]) -> Optional[Sequence]:
+        if v is None:
+            return None
+            
+        # Handle different data types appropriately
+        if isinstance(v, str):
+            # Strings should not be shuffled character-wise in this context
+            # They are likely single items, not batches of characters
+            return v
+            
+        if isinstance(v, torch.Tensor):
+            # Only shuffle if the tensor has the expected batch dimension
+            if v.shape[0] == batch_size:
+                return v[permutation]
+            else:
+                # If dimensions don't match, return as-is (safety)
+                return v
+                
+        if isinstance(v, (list, tuple)):
+            # Only shuffle if the list/tuple has the expected length
+            if len(v) == batch_size:
+                try:
+                    if isinstance(v, tuple):
+                        return tuple(v[i] for i in permutation)
+                    else:
+                        return [v[i] for i in permutation]
+                except (IndexError, TypeError):
+                    # If indexing fails for any reason, return as-is (safety)
+                    return v
+            else:
+                # If length doesn't match expected batch size, return as-is
+                return v
+        
+        # For other sequence types, try cautious indexing
+        try:
+            if hasattr(v, '__len__') and len(v) == batch_size:
+                return [v[i] for i in permutation]
+            else:
+                return v
+        except (IndexError, TypeError, AttributeError):
+            # If anything fails, return the original value (safety first)
+            return v
+
+    return {key: permute(val) for key, val in seq_dict.items()}
